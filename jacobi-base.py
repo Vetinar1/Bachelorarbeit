@@ -7,7 +7,7 @@ import multiprocessing as mp
 from lib.kernels import *
 from lib.solvers import *
 
-def gpu_worker(ndevs, mp_rank, gpu_rank, q, x_size, y_size):
+def gpu_worker(ndevs, mp_rank, gpu_rank, q, x_size, y_size, mode):
     if mp_rank != gpu_rank:
         print("WARNING: mp_rank ", mp_rank, " != gpu_rank ", gpu_rank)
 
@@ -41,15 +41,22 @@ def gpu_worker(ndevs, mp_rank, gpu_rank, q, x_size, y_size):
     blockspergrid = (blockspergrid_x, blockspergrid_y)
 
     print(f"Worker {mp_rank} initalising arrays")
-    jinit[blockspergrid, threadsperblock](a_new, mp_rank * x_size, n_devs * x_size)
-    jinit[blockspergrid, threadsperblock](a_old, mp_rank * x_size, n_devs * x_size)
+    nb_jinit[blockspergrid, threadsperblock](a_new, mp_rank * x_size, n_devs * x_size)
+    nb_jinit[blockspergrid, threadsperblock](a_old, mp_rank * x_size, n_devs * x_size)
 
-    a_old = nccl_solver(a_new, a_old, y_size, gpu_rank, ndevs, nccl_comm, blockspergrid, threadsperblock)
+    if mode == "cp_nccl":
+        a_old = nccl_solver(a_new, a_old, y_size, gpu_rank, ndevs, nccl_comm, blockspergrid, threadsperblock,
+                            cupy_kernels=True)
+    elif mode == "nb_nccl":
+        a_old = nccl_solver(a_new, a_old, y_size, gpu_rank, ndevs, nccl_comm, blockspergrid, threadsperblock)
+    else:
+        raise RuntimeWarning("invalid mode", mode)
+
 
     print(f"Worker {mp_rank} consolidating data...")
     a = cp.ones(( (x_size - 2) * ndevs, y_size), dtype=np.float32)
     # a_old = a_old[1:-1].flatten()
-    a_old = a_old.flatten()
+    a_old = a_old.flatten() # TODO these numbers dont quite add up
 
     cp.cuda.nccl.groupStart()
     nccl_comm.allGather(a_old.data.ptr, a.data.ptr, x_size * y_size, nccl.NCCL_FLOAT32, cp.cuda.Stream.null.ptr)
@@ -68,7 +75,7 @@ def gpu_worker(ndevs, mp_rank, gpu_rank, q, x_size, y_size):
     print(f"Worker {mp_rank} done")
 
 
-def launch_jacobi_workers(ndevs, x_size, y_size):
+def launch_jacobi_workers(ndevs, x_size, y_size, mode):
     gpu_ranks = [i for i in range(ndevs)]
     q = mp.SimpleQueue()
     procs = []
@@ -84,7 +91,7 @@ def launch_jacobi_workers(ndevs, x_size, y_size):
 
         worker = mp.Process(
             target=gpu_worker,
-            args=(ndevs, i, gpu_ranks[i], q, x_size_worker, y_size_worker)
+            args=(ndevs, i, gpu_ranks[i], q, x_size_worker, y_size_worker, mode)
         )
 
         print("Starting worker", i)
@@ -100,11 +107,13 @@ if __name__ == "__main__":
     x_size = 400
     y_size = 100
     n_devs = 4
+    mode = "nb_nccl"
 
     print(f"Started on {n_devs} devices with x = {x_size} and y = {y_size}")
     launch_jacobi_workers(
         ndevs=n_devs,
         x_size=x_size,
-        y_size=y_size
+        y_size=y_size,
+        mode=mode
     )
     # nb.cuda.profile_stop()

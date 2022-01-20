@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import multiprocessing as mp
 from lib.kernels import *
 from lib.solvers import *
+import signal
 
 def gpu_worker(ndevs, mp_rank, gpu_rank, q, x_size, y_size, mode):
     if mp_rank != gpu_rank:
@@ -26,6 +27,7 @@ def gpu_worker(ndevs, mp_rank, gpu_rank, q, x_size, y_size, mode):
     print(f"Worker {mp_rank} selecting CUDA device")
     cp.cuda.Device(gpu_rank).use() # TODO not sure if this is necessary
     print(f"Worker {mp_rank} on device", cp.cuda.get_device_id())
+
     print(f"Worker {mp_rank} creating NCCL communicator")
     nccl_comm = nccl.NcclCommunicator(ndevs, uid, gpu_rank) # TODO regular rank?
 
@@ -49,20 +51,20 @@ def gpu_worker(ndevs, mp_rank, gpu_rank, q, x_size, y_size, mode):
                             cupy_kernels=True)
     elif mode == "nb_nccl":
         a_old = nccl_solver(a_new, a_old, y_size, gpu_rank, ndevs, nccl_comm, blockspergrid, threadsperblock)
+    elif mode == "nb_nccl_prio":
+        a_old = nccl_priority_solver(a_new, a_old, y_size, gpu_rank, ndevs, nccl_comm, blockspergrid, threadsperblock)
     else:
         raise RuntimeWarning("invalid mode", mode)
 
 
     print(f"Worker {mp_rank} consolidating data...")
     a = cp.ones(( (x_size - 2) * ndevs, y_size), dtype=np.float32)
-    # a_old = a_old[1:-1].flatten()
+    a_old = a_old[1:-1].flatten()
     a_old = a_old.flatten() # TODO these numbers dont quite add up
 
     cp.cuda.nccl.groupStart()
     nccl_comm.allGather(a_old.data.ptr, a.data.ptr, x_size * y_size, nccl.NCCL_FLOAT32, cp.cuda.Stream.null.ptr)
     cp.cuda.nccl.groupEnd()
-    # a_plot = cp.asnumpy(a_old)
-    # np.savetxt(f"data{mp_rank}.csv", a_plot)
 
     if mp_rank == 0:
         a_plot = cp.asnumpy(a)
@@ -89,24 +91,38 @@ def launch_jacobi_workers(ndevs, x_size, y_size, mode):
     print("Creating workers...")
     for i in range(ndevs):
 
+        args = (ndevs, i, gpu_ranks[i], q, x_size_worker, y_size_worker, mode)
         worker = mp.Process(
             target=gpu_worker,
-            args=(ndevs, i, gpu_ranks[i], q, x_size_worker, y_size_worker, mode)
+            args=args
         )
+        procs.append(worker)
 
+    def exit_handler(sig, frame):
+        print("Ctrl C detected, cleaning up")
+        for i, worker in enumerate(procs):
+            print(i)
+            worker.terminate()
+        print("Exiting")
+        exit()
+
+    signal.signal(signal.SIGINT, exit_handler)
+
+    for worker in procs:
         print("Starting worker", i)
         worker.start()
-        procs.append(worker)
 
     for worker in procs:
         worker.join()
 
 
-# Heavily inspired by pynccl example
 if __name__ == "__main__":
+    n_devs = 4
+
     x_size = 400
     y_size = 100
-    n_devs = 4
+
+    # valid: nb_nccl, cp_nccl, nb_nccl_prio
     mode = "nb_nccl"
 
     print(f"Started on {n_devs} devices with x = {x_size} and y = {y_size}")

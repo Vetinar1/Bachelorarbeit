@@ -62,32 +62,41 @@ def jacobi(x_size, y_size):
 
     i = 0
     dist = 1
-    while dist > 1e-8 and i < 1000:
+    l2_old = None
+    l2_new = None
+    while dist > 1e-8 and i < 100:
+        if i == 10:
+            cp.cuda.profiler.start()
+        cp.cuda.nvtx.RangePush(f"iteration {i}")
         i += 1
-        print(i, dist)
+        cp.cuda.nvtx.RangePush(f"jstep")
         jstep[blockspergrid, threadsperblock](a_old, a_new)
+        cp.cuda.nvtx.RangePop()
 
-        l2_old = cp.linalg.norm(a_old)
-        l2_new = cp.linalg.norm(a_new)
-        dist = abs(l2_old - l2_new)
+        if i % 10 == 0:
+            cp.cuda.nvtx.RangePush(f"Norm calculation")
+            l2_old = l2_new or np.inf
+            l2_new = cp.linalg.norm(a_new)
+            dist = abs(l2_old - l2_new)
+            cp.cuda.nvtx.RangePop()
 
-        # a_old = cp.array(a_new)
-        # a_new = cp.zeros_like(a_old)
-        # jinit[blockspergrid, threadsperblock](a_new)
         a_old, a_new = a_new, a_old
+        cp.cuda.nvtx.RangePop()
 
+
+    cp.cuda.profiler.stop()
     print(i)
 
     a_plot = cp.asnumpy(a_old)
     print(round(time.time() - t1, 2), "s")
 
-    plt.imshow(a_plot)
-    plt.colorbar()
-    plt.show()
+    # plt.imshow(a_plot)
+    # plt.colorbar()
+    # plt.show()
 
 
 if __name__ == "__main__":
-    jacobi(1000, 100)
+    jacobi(10000, 1000)
     # print(cpx.time.repeat(jacobi, (50, 100), n_repeat=100, max_duration=60))
 
 

@@ -4,10 +4,11 @@ from lib.kernels import *
 import numpy as np
 from mpi4py import MPI
 
-def mpi_solver(a_new, a_old, y_size, gpu_rank, ndevs, comm, blockspergrid, threadsperblock, cupy_kernels=False):
+def mpi_solver(a_new, a_old, y_size, gpu_rank, ndevs, comm, blockspergrid, threadsperblock, cupy_kernels=False,
+               max_iterations=np.inf):
     dist = 1
     it = 0
-    while dist > 1e-5:
+    while dist > 1e-5 and it < max_iterations:
         it += 1
         if cupy_kernels:
             cp_jstep[blockspergrid, threadsperblock](a_old, a_new, a_old.shape[0], a_old.shape[1])
@@ -58,9 +59,14 @@ def mpi_solver(a_new, a_old, y_size, gpu_rank, ndevs, comm, blockspergrid, threa
     return a_old
 
 
-def gpu_worker(ndevs, mp_rank, gpu_rank, x_size, y_size, comm):
+def gpu_worker(ndevs, mp_rank, gpu_rank, x_size, y_size, comm, max_iterations=None):
     if mp_rank != gpu_rank:
         print("WARNING: mp_rank ", mp_rank, " != gpu_rank ", gpu_rank)
+
+    if max_iterations is None:
+        max_iterations = np.inf
+
+    print("max_iterations is", max_iterations)
 
     print(f"Worker {mp_rank} selecting CUDA device")
     cp.cuda.Device(gpu_rank).use() # TODO not sure if this is necessary
@@ -80,7 +86,8 @@ def gpu_worker(ndevs, mp_rank, gpu_rank, x_size, y_size, comm):
     nb_jinit[blockspergrid, threadsperblock](a_new, mp_rank * x_size, ndevs * x_size)
     nb_jinit[blockspergrid, threadsperblock](a_old, mp_rank * x_size, ndevs * x_size)
 
-    a_old = mpi_solver(a_new, a_old, y_size, gpu_rank, ndevs, comm, blockspergrid, threadsperblock)
+    a_old = mpi_solver(a_new, a_old, y_size, gpu_rank, ndevs, comm, blockspergrid, threadsperblock,
+                       max_iterations=max_iterations)
 
 
     print(f"Worker {mp_rank} consolidating data...")
@@ -113,6 +120,8 @@ if __name__ == "__main__":
     x_size_worker = math.ceil(x_size / size)
     y_size_worker = y_size
 
+    max_iterations=100
+
     print(f"Started on {size} devices with x = {x_size} and y = {y_size}")
     gpu_worker(
         size,
@@ -120,5 +129,6 @@ if __name__ == "__main__":
         rank,
         x_size_worker,
         y_size_worker,
-        comm
+        comm,
+        max_iterations
     )

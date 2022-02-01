@@ -8,7 +8,7 @@ from lib.kernels import *
 from lib.solvers import *
 import signal
 
-def gpu_worker(ndevs, mp_rank, gpu_rank, q, x_size, y_size, mode, max_iterations=None):
+def gpu_worker(ndevs, mp_rank, gpu_rank, q, x_size, y_size, mode, max_iterations=None, skipnorm=False):
     cp.cuda.nvtx.RangePush(f"GPU worker {gpu_rank} init start")
     if mp_rank != gpu_rank:
         print("WARNING: mp_rank ", mp_rank, " != gpu_rank ", gpu_rank)
@@ -56,13 +56,16 @@ def gpu_worker(ndevs, mp_rank, gpu_rank, q, x_size, y_size, mode, max_iterations
 
     if mode == "cp_nccl":
         a_old = nccl_solver(a_new, a_old, y_size, gpu_rank, ndevs, nccl_comm, blockspergrid, threadsperblock,
-                            cupy_kernels=True, max_iterations=max_iterations)
+                            cupy_kernels=True, max_iterations=max_iterations, skipnorm=skipnorm)
     elif mode == "nb_nccl":
         a_old = nccl_solver(a_new, a_old, y_size, gpu_rank, ndevs, nccl_comm, blockspergrid, threadsperblock,
-                            max_iterations=max_iterations)
+                            max_iterations=max_iterations, skipnorm=skipnorm)
     elif mode == "nb_nccl_prio":
         a_old = nccl_priority_solver(a_new, a_old, y_size, gpu_rank, ndevs, nccl_comm, blockspergrid, threadsperblock,
                                      max_iterations=max_iterations)
+    elif mode == "cp_nccl_prio":
+        a_old = nccl_priority_solver(a_new, a_old, y_size, gpu_rank, ndevs, nccl_comm, blockspergrid, threadsperblock,
+                                     cupy_kernels=True, max_iterations=max_iterations)
     else:
         raise RuntimeWarning("invalid mode", mode)
 
@@ -71,7 +74,7 @@ def gpu_worker(ndevs, mp_rank, gpu_rank, q, x_size, y_size, mode, max_iterations
     print(f"Worker {mp_rank} consolidating data...")
     a = cp.ones(( (x_size - 2) * ndevs, y_size), dtype=np.float32)
     a_old = a_old[1:-1].flatten()
-    a_old = a_old.flatten() # TODO these numbers dont quite add up
+    # a_old = a_old.flatten() # TODO these numbers dont quite add up
 
     cp.cuda.nccl.groupStart()
     nccl_comm.allGather(a_old.data.ptr, a.data.ptr, x_size * y_size, nccl.NCCL_FLOAT32, cp.cuda.Stream.null.ptr)
@@ -90,7 +93,7 @@ def gpu_worker(ndevs, mp_rank, gpu_rank, q, x_size, y_size, mode, max_iterations
     print(f"Worker {mp_rank} done")
 
 
-def launch_jacobi_workers(ndevs, x_size, y_size, mode, max_iterations=None):
+def launch_jacobi_workers(ndevs, x_size, y_size, mode, max_iterations=None, skipnorm=False):
     gpu_ranks = [i for i in range(ndevs)]
     q = mp.SimpleQueue()
     procs = []
@@ -104,7 +107,7 @@ def launch_jacobi_workers(ndevs, x_size, y_size, mode, max_iterations=None):
     print("Creating workers...")
     for i in range(ndevs):
 
-        args = (ndevs, i, gpu_ranks[i], q, x_size_worker, y_size_worker, mode, max_iterations)
+        args = (ndevs, i, gpu_ranks[i], q, x_size_worker, y_size_worker, mode, max_iterations, skipnorm)
         worker = mp.Process(
             target=gpu_worker,
             args=args
@@ -136,7 +139,8 @@ if __name__ == "__main__":
     y_size = 1000
 
     # valid: nb_nccl, cp_nccl, nb_nccl_prio
-    mode = "nb_nccl"
+    mode = "cp_nccl"
+    skipnorm = True
     max_iterations = 100
 
     print(f"Started on {n_devs} devices with x = {x_size} and y = {y_size}")
@@ -145,6 +149,7 @@ if __name__ == "__main__":
         x_size=x_size,
         y_size=y_size,
         mode=mode,
-        max_iterations=max_iterations
+        max_iterations=max_iterations,
+        skipnorm=skipnorm
     )
     # nb.cuda.profile_stop()

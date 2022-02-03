@@ -3,6 +3,7 @@ import cupy.cuda.nccl as nccl
 import numpy as np
 import numba as nb
 import cupy as cp
+from numba import jit
 
 try:
     from mpi4py import MPI
@@ -18,6 +19,7 @@ except:
 # - numba TODO
 # - (numba with priority streams) TODO
 
+
 def nccl_solver(a_new, a_old, y_size, gpu_rank, ndevs, nccl_comm, blockspergrid, threadsperblock,
                 cupy_kernels=False, max_iterations=np.inf, skipnorm=False):
     dist = 1
@@ -29,6 +31,9 @@ def nccl_solver(a_new, a_old, y_size, gpu_rank, ndevs, nccl_comm, blockspergrid,
     while dist > 1e-5 and it < max_iterations:
         if it == 10:
             cp.cuda.profiler.start()
+
+        if it % 1000 == 0:
+            print(f"Worker {gpu_rank} iteration", it)
 
         cp.cuda.nvtx.RangePush(f"GPU {gpu_rank} iteration {it}")
         it += 1
@@ -57,6 +62,10 @@ def nccl_solver(a_new, a_old, y_size, gpu_rank, ndevs, nccl_comm, blockspergrid,
             dist = cp.abs(l2_norm[0] - l2_norm[1])
 
             cp.cuda.nvtx.RangePop()
+
+        cp.cuda.nvtx.RangePush(f"GPU {gpu_rank} sync {it}")
+        cp.cuda.Device(gpu_rank).synchronize()
+        cp.cuda.nvtx.RangePop()
 
         cp.cuda.nvtx.RangePush(f"GPU {gpu_rank} comms {it}")
         cp.cuda.nccl.groupStart()
@@ -102,8 +111,8 @@ def nccl_priority_solver(a_new, a_old, y_size, gpu_rank, ndevs, nccl_comm, block
         cp.cuda.nvtx.RangePush(f"GPU {gpu_rank} edges {it}")
         # calculation of first and last row requires neighboring rows
         if cupy_kernels:
-            cp_jstep[blockspergrid, threadsperblock](a_old[:3], a_new[:3])
-            cp_jstep[blockspergrid, threadsperblock](a_old[-3:], a_new[-3:])
+            cp_jstep[blockspergrid, threadsperblock](a_old[:3].ravel(), a_new[:3].ravel(), 3, a_new.shape[1])
+            cp_jstep[blockspergrid, threadsperblock](a_old[-3:].ravel(), a_new[-3:].ravel(), 3, a_new.shape[1])
         else:
             nb_jstep[blockspergrid, threadsperblock](a_old[:3], a_new[:3])
             nb_jstep[blockspergrid, threadsperblock](a_old[-3:], a_new[-3:])
@@ -113,7 +122,8 @@ def nccl_priority_solver(a_new, a_old, y_size, gpu_rank, ndevs, nccl_comm, block
         # slices this way because the kernel excludes edges
         cp.cuda.nvtx.RangePush(f"GPU {gpu_rank} body {it}")
         if cupy_kernels:
-            cp_jstep[blockspergrid, threadsperblock](a_old[1:-1], a_new[1:-1])
+            cp_jstep[blockspergrid, threadsperblock](a_old[1:-1].ravel(), a_new[1:-1].ravel(), a_new[1:-1].shape[0],
+                                                     a_new.shape[1])
         else:
             nb_jstep[blockspergrid, threadsperblock](a_old[1:-1], a_new[1:-1])
         cp.cuda.nvtx.RangePop()

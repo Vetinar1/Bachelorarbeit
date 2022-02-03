@@ -7,6 +7,7 @@ import multiprocessing as mp
 from lib.kernels import *
 from lib.solvers import *
 import signal
+import time
 
 def gpu_worker(ndevs, mp_rank, gpu_rank, q, x_size, y_size, mode, max_iterations=None, skipnorm=False):
     cp.cuda.nvtx.RangePush(f"GPU worker {gpu_rank} init start")
@@ -54,6 +55,8 @@ def gpu_worker(ndevs, mp_rank, gpu_rank, q, x_size, y_size, mode, max_iterations
 
     cp.cuda.nvtx.RangePop()
 
+    t_start = time.time()
+
     if mode == "cp_nccl":
         a_old = nccl_solver(a_new, a_old, y_size, gpu_rank, ndevs, nccl_comm, blockspergrid, threadsperblock,
                             cupy_kernels=True, max_iterations=max_iterations, skipnorm=skipnorm)
@@ -62,12 +65,20 @@ def gpu_worker(ndevs, mp_rank, gpu_rank, q, x_size, y_size, mode, max_iterations
                             max_iterations=max_iterations, skipnorm=skipnorm)
     elif mode == "nb_nccl_prio":
         a_old = nccl_priority_solver(a_new, a_old, y_size, gpu_rank, ndevs, nccl_comm, blockspergrid, threadsperblock,
-                                     max_iterations=max_iterations)
+                                     max_iterations=max_iterations, skipnorm=skipnorm)
     elif mode == "cp_nccl_prio":
         a_old = nccl_priority_solver(a_new, a_old, y_size, gpu_rank, ndevs, nccl_comm, blockspergrid, threadsperblock,
-                                     cupy_kernels=True, max_iterations=max_iterations)
+                                     cupy_kernels=True, max_iterations=max_iterations, skipnorm=skipnorm)
     else:
         raise RuntimeWarning("invalid mode", mode)
+
+    t_end = time.time()
+    print(f"Iteration on worker {mp_rank}: Pure CPU time {t_end - t_start:.2f}s")
+    cp.cuda.nvtx.RangePush(f"Worker {mp_rank} sync")
+    cp.cuda.Device(mp_rank).synchronize()
+    cp.cuda.nvtx.RangePop()
+    t_sync = time.time()
+    print(f"Iteration on worker {mp_rank}: Including sync time {t_sync - t_start:.2f}s")
 
     cp.cuda.nvtx.RangePush(f"GPU worker {gpu_rank} cleanup start")
 
@@ -135,13 +146,15 @@ def launch_jacobi_workers(ndevs, x_size, y_size, mode, max_iterations=None, skip
 if __name__ == "__main__":
     n_devs = 4
 
-    x_size = 4000
-    y_size = 1000
+    # x_size, y_size = (8192, 8192)
+    x_size, y_size = (16384, 16384)
+    # x_size, y_size = (32768, 32768)
+    # x_size, y_size = (65536, 65536)
 
     # valid: nb_nccl, cp_nccl, nb_nccl_prio
     mode = "cp_nccl"
     skipnorm = True
-    max_iterations = 100
+    max_iterations = 100000
 
     print(f"Started on {n_devs} devices with x = {x_size} and y = {y_size}")
     launch_jacobi_workers(
